@@ -1,0 +1,325 @@
+Понял. Делаю **полностью на C#** (как указано в задании: NLog, FileStream/using, AppDomain, ASP.NET Core).
+
+Ниже готовый код по всем пунктам 5.1–5.5.
+
+---
+
+### 1. Консольное приложение + обработка исключений + NLog (п. 5.1)
+
+**Проект:** Console App (.NET 8)
+
+**Установка NLog:**
+```bash
+dotnet add package NLog
+dotnet add package NLog.Extensions.Logging
+```
+
+**Файл `nlog.config`** (рядом с `.csproj`):
+```xml
+<?xml version="1.0" encoding="utf-8" ?>
+<nlog xmlns="http://www.nlog-project.org/schemas/NLog.xsd"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <targets>
+    <target name="errors" xsi:type="File" fileName="errors.log"
+            layout="${longdate} | ${level} | ${message} ${exception:format=tostring}" />
+  </targets>
+  <rules>
+    <logger name="*" minlevel="Error" writeTo="errors" />
+  </rules>
+</nlog>
+```
+
+**Program.cs:**
+```csharp
+using NLog;
+using System;
+
+class Program
+{
+    private static readonly Logger logger = LogManager.GetCurrentClassLogger();
+
+    static void Main()
+    {
+        try
+        {
+            Console.Write("Введите первое число: ");
+            double a = double.Parse(Console.ReadLine()!);
+
+            Console.Write("Введите второе число: ");
+            double b = double.Parse(Console.ReadLine()!);
+
+            double result = a / b;
+            Console.WriteLine($"Результат деления: {result}");
+        }
+        catch (FormatException)
+        {
+            string msg = "Ошибка формата: введено не число (FormatException)";
+            Console.WriteLine(msg);
+            logger.Error(msg);
+        }
+        catch (DivideByZeroException)
+        {
+            string msg = "Ошибка: деление на ноль (DivideByZeroException)";
+            Console.WriteLine(msg);
+            logger.Error(msg);
+        }
+        catch (Exception ex)
+        {
+            string msg = $"Общее исключение: {ex.Message}\n{ex.StackTrace}";
+            Console.WriteLine(msg);
+            logger.Error(ex, msg);
+        }
+    }
+}
+```
+
+---
+
+### 2. Пользовательское исключение `NegativeNumberException` (п. 5.2)
+
+```csharp
+public class NegativeNumberException : Exception
+{
+    public NegativeNumberException() : base("Число не может быть отрицательным") { }
+
+    public NegativeNumberException(string message) : base(message) { }
+
+    public NegativeNumberException(string message, Exception inner) : base(message, inner) { }
+}
+```
+
+**Использование:**
+```csharp
+static void CheckAge()
+{
+    try
+    {
+        Console.Write("Введите возраст: ");
+        int age = int.Parse(Console.ReadLine()!);
+
+        if (age < 0)
+            throw new NegativeNumberException("Возраст не может быть отрицательным!");
+
+        Console.WriteLine($"Возраст принят: {age}");
+    }
+    catch (NegativeNumberException ex)
+    {
+        Console.WriteLine($"Ошибка: {ex.Message}");
+    }
+    catch (FormatException)
+    {
+        Console.WriteLine("Ошибка: введено не целое число");
+    }
+}
+```
+
+---
+
+### 3. Работа с файлом + `using` / `finally` (п. 5.3)
+
+```csharp
+static void ProcessFile(string filename = "numbers.txt")
+{
+    StreamReader? reader = null;
+    try
+    {
+        // Рекомендуемый способ — using
+        using (reader = new StreamReader(filename))
+        {
+            var evenNumbers = new List<int>();
+            string? line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                if (int.TryParse(line.Trim(), out int num) && num % 2 == 0)
+                    evenNumbers.Add(num);
+            }
+            Console.WriteLine("Чётные числа: " + string.Join(", ", evenNumbers));
+        }
+    }
+    catch (FileNotFoundException)
+    {
+        Console.WriteLine($"Файл '{filename}' не найден (FileNotFoundException)");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Ошибка: {ex.Message}");
+    }
+    finally
+    {
+        // Даже если using уже закрыл — проверяем
+        if (reader != null && reader.BaseStream != null && reader.BaseStream.CanRead)
+        {
+            reader.Close();
+            Console.WriteLine("Файл принудительно закрыт в finally");
+        }
+        else
+        {
+            Console.WriteLine("Файл уже закрыт (или не открывался)");
+        }
+    }
+}
+```
+
+Альтернатива без `using` (только `finally`):
+```csharp
+static void ProcessFileFinally(string filename = "numbers.txt")
+{
+    StreamReader? reader = null;
+    try
+    {
+        reader = new StreamReader(filename);
+        // ... обработка
+    }
+    catch (FileNotFoundException)
+    {
+        Console.WriteLine("Файл не найден");
+    }
+    finally
+    {
+        reader?.Close();
+        Console.WriteLine("Файл закрыт в finally");
+    }
+}
+```
+
+---
+
+### 4. Глобальный обработчик необработанных исключений (п. 5.4)
+
+```csharp
+using NLog;
+
+class Program
+{
+    private static readonly Logger crashLogger = LogManager.GetLogger("crash");
+
+    static void Main()
+    {
+        // Глобальный обработчик
+        AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+        {
+            var ex = (Exception)e.ExceptionObject;
+            crashLogger.Fatal(ex, "Критическая необработанная ошибка");
+            Console.WriteLine("Произошла ошибка. Подробности в логах.");
+        };
+
+        // Пример необработанного исключения
+        throw new InvalidOperationException("Тестовая критическая ошибка");
+    }
+}
+```
+
+Добавь в `nlog.config` отдельный target:
+```xml
+<target name="crash" xsi:type="File" fileName="crash.log"
+        layout="${longdate} | ${level} | ${message} ${exception:format=tostring}" />
+...
+<logger name="crash" minlevel="Fatal" writeTo="crash" />
+```
+
+---
+
+### 5. REST API на ASP.NET Core (п. 5.5)
+
+**Создаём проект:**
+```bash
+dotnet new webapi -n Lab6Api
+cd Lab6Api
+dotnet add package NLog.Web.AspNetCore
+```
+
+**Program.cs (минимальный API):**
+```csharp
+using NLog.Web;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Logging.ClearProviders();
+builder.Host.UseNLog();
+
+var app = builder.Build();
+
+var users = new Dictionary<int, object>
+{
+    [1] = new { id = 1, name = "Иван" },
+    [2] = new { id = 2, name = "Мария" },
+    [123] = new { id = 123, name = "Тестовый пользователь" }
+};
+
+app.MapGet("/user", (string? id, ILogger<Program> logger) =>
+{
+    if (string.IsNullOrEmpty(id))
+    {
+        return Results.Json(new { error = "Missing id parameter", statusCode = 400 }, statusCode: 400);
+    }
+
+    if (!int.TryParse(id, out int userId))
+    {
+        logger.LogError("Invalid ID format: {Id}", id);
+        return Results.Json(new { error = "Invalid ID format", statusCode = 400 }, statusCode: 400);
+    }
+
+    if (!users.TryGetValue(userId, out var user))
+    {
+        logger.LogWarning("User not found: {Id}", userId);
+        return Results.NotFound(new { error = "User not found", statusCode = 404 });
+    }
+
+    return Results.Ok(user);
+});
+
+// Глобальный обработчик необработанных исключений
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+        logger.LogError("Необработанное исключение в API");
+        context.Response.StatusCode = 500;
+        await context.Response.WriteAsJsonAsync(new { error = "Internal Server Error", statusCode = 500 });
+    });
+});
+
+app.Run();
+```
+
+**nlog.config** (для API):
+```xml
+<?xml version="1.0" encoding="utf-8" ?>
+<nlog>
+  <targets>
+    <target name="api" xsi:type="File" fileName="api_errors.log"
+            layout="${longdate} | ${level} | ${message} ${exception:format=tostring}" />
+  </targets>
+  <rules>
+    <logger name="*" minlevel="Error" writeTo="api" />
+  </rules>
+</nlog>
+```
+
+**Проверка:**
+- `GET /user?id=123` → 200
+- `GET /user?id=999` → 404
+- `GET /user?id=abc` → 400 + JSON
+
+---
+
+### Ответы на контрольные вопросы (те же, только с учётом C#)
+
+**8.1** Исключение — объект, сигнализирующий об ошибке во время выполнения.  
+**8.2** `if-else` — для ожидаемых ситуаций, `try-catch` — для исключительных. Исключения удобнее, когда ошибка редкая и нужна централизованная обработка.  
+**8.3** `Exception`, `FormatException`, `DivideByZeroException`, `FileNotFoundException`, `ArgumentException`, `InvalidOperationException` и др.  
+**8.4** Наследуемся от `Exception` и пишем конструкторы (см. `NegativeNumberException` выше).  
+**8.5** `finally` гарантирует выполнение ресурса. `using` — синтаксический сахар, который автоматически вызывает `Dispose` (внутри использует `finally`).  
+**8.6** `AppDomain.CurrentDomain.UnhandledException`  
+**8.7** Пустой `catch` без логирования и без `throw` — антипаттерн, потому что ошибка скрывается.
+
+---
+
+Всё готово на **чистом C#**.  
+
+Нужно:
+- один общий `.csproj` со всеми примерами,
+- готовый отчёт в `.docx`,
+- или доработка под конкретную версию .NET / Visual Studio —
+
+пиши, сделаю.
