@@ -1,0 +1,565 @@
+Вот полноценная реализация **5.2** на **C# (ASP.NET Core 8 + Entity Framework Core + JWT)** строго под вашу схему БД.
+
+### Структура проекта
+
+```
+LearningApp.Api/
+├── Controllers/
+│   ├── AuthController.cs
+│   ├── MaterialsController.cs
+│   └── TestsController.cs
+├── Data/
+│   └── AppDbContext.cs
+├── Models/
+│   ├── Role.cs
+│   ├── User.cs
+│   ├── Topic.cs
+│   ├── Material.cs
+│   ├── Test.cs
+│   ├── Question.cs
+│   └── AnswerOption.cs
+├── DTOs/
+│   ├── Auth/
+│   ├── Materials/
+│   └── Tests/
+├── Services/
+│   ├── JwtService.cs
+│   └── PasswordHasher.cs
+└── Program.cs
+```
+
+---
+
+### 1. Модели (1-в-1 с вашей БД)
+
+```csharp
+// Models/Role.cs
+public class Role
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = null!; // "student" / "teacher"
+}
+
+// Models/User.cs
+public class User
+{
+    public int Id { get; set; }
+    public int RoleId { get; set; }
+    public string Login { get; set; } = null!;
+    public string PasswordHash { get; set; } = null!;
+    public string FullName { get; set; } = null!;
+
+    public Role Role { get; set; } = null!;
+}
+
+// Models/Topic.cs
+public class Topic
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = null!;
+    public string? Description { get; set; }
+}
+
+// Models/Material.cs
+public class Material
+{
+    public int Id { get; set; }
+    public int TopicId { get; set; }
+    public string Title { get; set; } = null!;
+    public string Type { get; set; } = null!; // text, html, pdf, video...
+    public string? Content { get; set; }
+    public string? FileUrl { get; set; }
+
+    public Topic Topic { get; set; } = null!;
+}
+
+// Models/Test.cs
+public class Test
+{
+    public int Id { get; set; }
+    public int TopicId { get; set; }
+    public string Title { get; set; } = null!;
+    public int TimeLimitSec { get; set; }
+    public int QuestionsPerTry { get; set; }
+
+    public Topic Topic { get; set; } = null!;
+    public ICollection<Question> Questions { get; set; } = new List<Question>();
+}
+
+// Models/Question.cs
+public class Question
+{
+    public int Id { get; set; }
+    public int TestId { get; set; }
+    public string Text { get; set; } = null!;
+    public string? Explanation { get; set; }
+
+    public Test Test { get; set; } = null!;
+    public ICollection<AnswerOption> AnswerOptions { get; set; } = new List<AnswerOption>();
+}
+
+// Models/AnswerOption.cs
+public class AnswerOption
+{
+    public int Id { get; set; }
+    public int QuestionId { get; set; }
+    public string Text { get; set; } = null!;
+    public bool IsCorrect { get; set; }
+
+    public Question Question { get; set; } = null!;
+}
+```
+
+---
+
+### 2. DbContext
+
+```csharp
+// Data/AppDbContext.cs
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+    public DbSet<Role> Roles => Set<Role>();
+    public DbSet<User> Users => Set<User>();
+    public DbSet<Topic> Topics => Set<Topic>();
+    public DbSet<Material> Materials => Set<Material>();
+    public DbSet<Test> Tests => Set<Test>();
+    public DbSet<Question> Questions => Set<Question>();
+    public DbSet<AnswerOption> AnswerOptions => Set<AnswerOption>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<User>()
+            .HasOne(u => u.Role)
+            .WithMany()
+            .HasForeignKey(u => u.RoleId);
+
+        modelBuilder.Entity<Material>()
+            .HasOne(m => m.Topic)
+            .WithMany()
+            .HasForeignKey(m => m.TopicId);
+
+        modelBuilder.Entity<Test>()
+            .HasOne(t => t.Topic)
+            .WithMany()
+            .HasForeignKey(t => t.TopicId);
+
+        modelBuilder.Entity<Question>()
+            .HasOne(q => q.Test)
+            .WithMany(t => t.Questions)
+            .HasForeignKey(q => q.TestId);
+
+        modelBuilder.Entity<AnswerOption>()
+            .HasOne(a => a.Question)
+            .WithMany(q => q.AnswerOptions)
+            .HasForeignKey(a => a.QuestionId);
+    }
+}
+```
+
+---
+
+### 3. JWT + Password
+
+```csharp
+// Services/JwtService.cs
+public class JwtService
+{
+    private readonly IConfiguration _config;
+
+    public JwtService(IConfiguration config) => _config = config;
+
+    public string GenerateToken(User user)
+    {
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new Claim(ClaimTypes.Name, user.Login),
+            new Claim(ClaimTypes.Role, user.Role.Name)
+        };
+
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]!));
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+        var token = new JwtSecurityToken(
+            issuer: _config["Jwt:Issuer"],
+            audience: _config["Jwt:Audience"],
+            claims: claims,
+            expires: DateTime.UtcNow.AddDays(7),
+            signingCredentials: creds);
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+}
+
+// Services/PasswordHasher.cs
+public static class PasswordHasher
+{
+    public static string Hash(string password) => BCrypt.Net.BCrypt.HashPassword(password);
+    public static bool Verify(string password, string hash) => BCrypt.Net.BCrypt.Verify(password, hash);
+}
+```
+
+---
+
+### 4. AuthController
+
+```csharp
+[ApiController]
+[Route("api/auth")]
+public class AuthController : ControllerBase
+{
+    private readonly AppDbContext _db;
+    private readonly JwtService _jwt;
+
+    public AuthController(AppDbContext db, JwtService jwt)
+    {
+        _db = db;
+        _jwt = jwt;
+    }
+
+    [HttpPost("register")]
+    public async Task<IActionResult> Register([FromBody] RegisterDto dto)
+    {
+        if (await _db.Users.AnyAsync(u => u.Login == dto.Login))
+            return BadRequest("Логин уже занят");
+
+        var role = await _db.Roles.FirstOrDefaultAsync(r => r.Name == dto.Role);
+        if (role == null) return BadRequest("Неверная роль");
+
+        var user = new User
+        {
+            Login = dto.Login,
+            PasswordHash = PasswordHasher.Hash(dto.Password),
+            FullName = dto.FullName,
+            RoleId = role.Id
+        };
+
+        _db.Users.Add(user);
+        await _db.SaveChangesAsync();
+
+        return Ok(new { message = "Регистрация успешна" });
+    }
+
+    [HttpPost("login")]
+    public async Task<IActionResult> Login([FromBody] LoginDto dto)
+    {
+        var user = await _db.Users
+            .Include(u => u.Role)
+            .FirstOrDefaultAsync(u => u.Login == dto.Login);
+
+        if (user == null || !PasswordHasher.Verify(dto.Password, user.PasswordHash))
+            return Unauthorized("Неверный логин или пароль");
+
+        var token = _jwt.GenerateToken(user);
+
+        return Ok(new
+        {
+            token,
+            user = new
+            {
+                user.Id,
+                user.Login,
+                user.FullName,
+                role = user.Role.Name
+            }
+        });
+    }
+
+    [Authorize]
+    [HttpGet("me")]
+    public async Task<IActionResult> Me()
+    {
+        var userId = int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var user = await _db.Users.Include(u => u.Role).FirstAsync(u => u.Id == userId);
+
+        return Ok(new
+        {
+            user.Id,
+            user.Login,
+            user.FullName,
+            role = user.Role.Name
+        });
+    }
+}
+```
+
+---
+
+### 5. MaterialsController (CRUD)
+
+```csharp
+[ApiController]
+[Route("api/materials")]
+[Authorize]
+public class MaterialsController : ControllerBase
+{
+    private readonly AppDbContext _db;
+
+    public MaterialsController(AppDbContext db) => _db = db;
+
+    [HttpGet]
+    public async Task<IActionResult> GetAll([FromQuery] int? topicId)
+    {
+        var query = _db.Materials.AsQueryable();
+        if (topicId.HasValue)
+            query = query.Where(m => m.TopicId == topicId);
+
+        return Ok(await query.ToListAsync());
+    }
+
+    [HttpGet("{id}")]
+    public async Task<IActionResult> Get(int id)
+    {
+        var material = await _db.Materials.FindAsync(id);
+        return material == null ? NotFound() : Ok(material);
+    }
+
+    [HttpPost]
+    [Authorize(Roles = "teacher")]
+    public async Task<IActionResult> Create([FromBody] MaterialDto dto)
+    {
+        var material = new Material
+        {
+            TopicId = dto.TopicId,
+            Title = dto.Title,
+            Type = dto.Type,
+            Content = dto.Content,
+            FileUrl = dto.FileUrl
+        };
+
+        _db.Materials.Add(material);
+        await _db.SaveChangesAsync();
+        return CreatedAtAction(nameof(Get), new { id = material.Id }, material);
+    }
+
+    [HttpPut("{id}")]
+    [Authorize(Roles = "teacher")]
+    public async Task<IActionResult> Update(int id, [FromBody] MaterialDto dto)
+    {
+        var material = await _db.Materials.FindAsync(id);
+        if (material == null) return NotFound();
+
+        material.TopicId = dto.TopicId;
+        material.Title = dto.Title;
+        material.Type = dto.Type;
+        material.Content = dto.Content;
+        material.FileUrl = dto.FileUrl;
+
+        await _db.SaveChangesAsync();
+        return Ok(material);
+    }
+
+    [HttpDelete("{id}")]
+    [Authorize(Roles = "teacher")]
+    public async Task<IActionResult> Delete(int id)
+    {
+        var material = await _db.Materials.FindAsync(id);
+        if (material == null) return NotFound();
+
+        _db.Materials.Remove(material);
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+}
+```
+
+---
+
+### 6. TestsController (создание + прохождение)
+
+```csharp
+[ApiController]
+[Route("api/tests")]
+[Authorize]
+public class TestsController : ControllerBase
+{
+    private readonly AppDbContext _db;
+
+    public TestsController(AppDbContext db) => _db = db;
+
+    // ===== Преподаватель =====
+
+    [HttpGet]
+    public async Task<IActionResult> GetAll([FromQuery] int? topicId)
+    {
+        var query = _db.Tests.AsQueryable();
+        if (topicId.HasValue)
+            query = query.Where(t => t.TopicId == topicId);
+
+        return Ok(await query.ToListAsync());
+    }
+
+    [HttpGet("{id}")]
+    public async Task<IActionResult> GetFull(int id)
+    {
+        var test = await _db.Tests
+            .Include(t => t.Questions)
+                .ThenInclude(q => q.AnswerOptions)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        return test == null ? NotFound() : Ok(test);
+    }
+
+    [HttpPost]
+    [Authorize(Roles = "teacher")]
+    public async Task<IActionResult> Create([FromBody] CreateTestDto dto)
+    {
+        var test = new Test
+        {
+            TopicId = dto.TopicId,
+            Title = dto.Title,
+            TimeLimitSec = dto.TimeLimitSec,
+            QuestionsPerTry = dto.QuestionsPerTry
+        };
+
+        foreach (var qDto in dto.Questions)
+        {
+            var question = new Question
+            {
+                Text = qDto.Text,
+                Explanation = qDto.Explanation
+            };
+
+            foreach (var opt in qDto.Options)
+            {
+                question.AnswerOptions.Add(new AnswerOption
+                {
+                    Text = opt.Text,
+                    IsCorrect = opt.IsCorrect
+                });
+            }
+
+            test.Questions.Add(question);
+        }
+
+        _db.Tests.Add(test);
+        await _db.SaveChangesAsync();
+        return CreatedAtAction(nameof(GetFull), new { id = test.Id }, test);
+    }
+
+    // ===== Студент =====
+
+    [HttpPost("{id}/submit")]
+    [Authorize(Roles = "student")]
+    public async Task<IActionResult> Submit(int id, [FromBody] SubmitTestDto dto)
+    {
+        var test = await _db.Tests
+            .Include(t => t.Questions)
+                .ThenInclude(q => q.AnswerOptions)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        if (test == null) return NotFound();
+
+        int score = 0;
+        var details = new List<object>();
+
+        foreach (var answer in dto.Answers)
+        {
+            var question = test.Questions.FirstOrDefault(q => q.Id == answer.QuestionId);
+            if (question == null) continue;
+
+            bool isCorrect = false;
+
+            if (answer.SelectedOptionIds != null && answer.SelectedOptionIds.Any())
+            {
+                var correctIds = question.AnswerOptions
+                    .Where(o => o.IsCorrect)
+                    .Select(o => o.Id)
+                    .OrderBy(x => x)
+                    .ToList();
+
+                var selected = answer.SelectedOptionIds.OrderBy(x => x).ToList();
+                isCorrect = correctIds.SequenceEqual(selected);
+            }
+
+            if (isCorrect) score++;
+
+            details.Add(new
+            {
+                question_id = question.Id,
+                is_correct = isCorrect,
+                explanation = question.Explanation
+            });
+        }
+
+        return Ok(new
+        {
+            score,
+            max_score = test.Questions.Count,
+            percent = test.Questions.Count == 0 ? 0 : score * 100 / test.Questions.Count,
+            details
+        });
+    }
+}
+```
+
+---
+
+### 7. Program.cs (настройка)
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+builder.Services.AddScoped<JwtService>();
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
+        };
+    });
+
+builder.Services.AddAuthorization();
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+app.UseSwagger();
+app.UseSwaggerUI();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+app.Run();
+```
+
+---
+
+### appsettings.json
+
+```json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=localhost;Database=LabWork1;User Id=sa;Password=YourPassword;TrustServerCertificate=True;"
+  },
+  "Jwt": {
+    "Key": "super_secret_key_minimum_32_characters_long!",
+    "Issuer": "LearningApp",
+    "Audience": "LearningApp"
+  }
+}
+```
+
+---
+
+Нужно ли добавить:
+- таблицу `TestAttempts` (история прохождения)?
+- загрузку файлов для материалов?
+- или сразу готовый `.csproj` + полный код всех DTO?
+
+Скажи, что допилить.
