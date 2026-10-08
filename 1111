@@ -563,3 +563,94 @@ app.Run();
 - или сразу готовый `.csproj` + полный код всех DTO?
 
 Скажи, что допилить.
+
+
+
+Вот все недостающие **DTO**, которые я не написал в прошлом сообщении.
+
+### DTOs / Auth
+
+```csharp
+// DTOs/Auth/RegisterDto.cs
+public class RegisterDto
+{
+    public string Login { get; set; } = null!;
+    public string Password { get; set; } = null!;
+    public string FullName { get; set; } = null!;
+    public string Role { get; set; } = null!; // "student" или "teacher"
+}
+
+// DTOs/Auth/LoginDto.cs
+public class LoginDto
+{
+    public string Login { get; set; } = null!;
+    public string Password { get; set; } = null!;
+}
+```
+
+---
+
+### DTOs / Materials
+
+```csharp
+// DTOs/Materials/MaterialDto.cs
+public class MaterialDto
+{
+    public int TopicId { get; set; }
+    public string Title { get; set; } = null!;
+    public string Type { get; set; } = null!;      // text, html, pdf, docx, video, audio...
+    public string? Content { get; set; }
+    public string? FileUrl { get; set; }
+}
+```
+
+---
+
+### DTOs / Tests
+
+```csharp
+// DTOs/Tests/CreateTestDto.cs
+public class CreateTestDto
+{
+    public int TopicId { get; set; }
+    public string Title { get; set; } = null!;
+    public int TimeLimitSec { get; set; }
+    public int QuestionsPerTry { get; set; }
+    public List<CreateQuestionDto> Questions { get; set; } = new();
+}
+
+public class CreateQuestionDto
+{
+    public string Text { get; set; } = null!;
+    public string? Explanation { get; set; }
+    public List<CreateOptionDto> Options { get; set; } = new();
+}
+
+public class CreateOptionDto
+{
+    public string Text { get; set; } = null!;
+    public bool IsCorrect { get; set; }
+}
+
+// DTOs/Tests/SubmitTestDto.cs
+public class SubmitTestDto
+{
+    public List<SubmitAnswerDto> Answers { get; set; } = new();
+}
+
+public class SubmitAnswerDto
+{
+    public int QuestionId { get; set; }
+    public List<int>? SelectedOptionIds { get; set; }  // для вопросов с вариантами
+    public string? TextAnswer { get; set; }             // на будущее, если будет свободный ввод
+}
+```
+
+---
+
+Теперь всё полное.  
+Хочешь, я ещё добавлю:
+
+1. `UpdateTestDto` (для PUT)
+2. Ответные DTO (чтобы не светить `IsCorrect` студенту при получении теста)
+3. Или сразу сделаю версию с `TestAttempt` (история прохождений)?
