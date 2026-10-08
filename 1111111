@@ -1,0 +1,421 @@
+Сделаю **5.3 на Blazor** (WebAssembly) — чисто, удобно и лучше предыдущего варианта.
+
+### Структура клиента (Blazor WASM)
+
+```
+LearningApp.Client/
+├── Pages/
+│   ├── Topics.razor
+│   ├── Materials.razor
+│   ├── Study.razor          ← главный экран изучения
+│   └── Progress.razor
+├── Components/
+│   ├── TopicCard.razor
+│   ├── MaterialCard.razor
+│   └── MaterialViewer.razor
+├── Services/
+│   ├── ApiService.cs
+│   └── ProgressTracker.cs
+├── Models/
+│   └── ...
+└── wwwroot/
+    └── css/
+        └── study.css
+```
+
+---
+
+### 1. Модели
+
+```csharp
+// Models/Topic.cs
+public class Topic
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = "";
+    public string? Description { get; set; }
+}
+
+// Models/Material.cs
+public class Material
+{
+    public int Id { get; set; }
+    public int TopicId { get; set; }
+    public string Title { get; set; } = "";
+    public string Type { get; set; } = ""; // text, html, pdf, video...
+    public string? Content { get; set; }
+    public string? FileUrl { get; set; }
+}
+
+// Models/MaterialProgress.cs
+public class MaterialProgress
+{
+    public int MaterialId { get; set; }
+    public bool IsVisited { get; set; }
+    public int TimeSpentSec { get; set; }
+    public DateTime? LastOpenedAt { get; set; }
+}
+```
+
+---
+
+### 2. ApiService
+
+```csharp
+// Services/ApiService.cs
+public class ApiService
+{
+    private readonly HttpClient _http;
+
+    public ApiService(HttpClient http) => _http = http;
+
+    public async Task<List<Topic>> GetTopicsAsync()
+        => await _http.GetFromJsonAsync<List<Topic>>("api/topics") ?? new();
+
+    public async Task<List<Material>> GetMaterialsAsync(int topicId)
+        => await _http.GetFromJsonAsync<List<Material>>($"api/materials?topicId={topicId}") ?? new();
+
+    public async Task<Material?> GetMaterialAsync(int id)
+        => await _http.GetFromJsonAsync<Material>($"api/materials/{id}");
+
+    public async Task<MaterialProgress?> GetProgressAsync(int materialId)
+        => await _http.GetFromJsonAsync<MaterialProgress>($"api/materials/{materialId}/progress");
+
+    public async Task UpdateProgressAsync(int materialId, int timeSpentSec)
+    {
+        await _http.PostAsJsonAsync($"api/materials/{materialId}/progress", new
+        {
+            TimeSpentSec = timeSpentSec
+        });
+    }
+
+    public async Task<List<MaterialProgress>> GetAllProgressAsync()
+        => await _http.GetFromJsonAsync<List<MaterialProgress>>("api/progress") ?? new();
+}
+```
+
+---
+
+### 3. Страница списка тем
+
+```razor
+@page "/topics"
+@inject ApiService Api
+@inject NavigationManager Nav
+
+<h2 class="mb-4">Темы курса</h2>
+
+@if (topics == null)
+{
+    <p>Загрузка...</p>
+}
+else
+{
+    <div class="row g-3">
+        @foreach (var topic in topics)
+        {
+            <div class="col-md-4">
+                <div class="card h-100 shadow-sm topic-card" @onclick="() => OpenTopic(topic.Id)">
+                    <div class="card-body">
+                        <h5 class="card-title">@topic.Title</h5>
+                        <p class="card-text text-muted">@topic.Description</p>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private List<Topic>? topics;
+
+    protected override async Task OnInitializedAsync()
+    {
+        topics = await Api.GetTopicsAsync();
+    }
+
+    private void OpenTopic(int id) => Nav.NavigateTo($"/materials/{id}");
+}
+```
+
+---
+
+### 4. Страница материалов темы
+
+```razor
+@page "/materials/{TopicId:int}"
+@inject ApiService Api
+@inject NavigationManager Nav
+
+<h2 class="mb-4">Материалы темы</h2>
+
+@if (materials == null)
+{
+    <p>Загрузка...</p>
+}
+else
+{
+    <div class="list-group">
+        @foreach (var m in materials)
+        {
+            var progress = progressList?.FirstOrDefault(p => p.MaterialId == m.Id);
+
+            <div class="list-group-item list-group-item-action d-flex justify-content-between align-items-center material-item"
+                 @onclick="() => OpenMaterial(m.Id)">
+                <div>
+                    <span class="badge bg-secondary me-2">@m.Type.ToUpper()</span>
+                    <strong>@m.Title</strong>
+                </div>
+
+                <div>
+                    @if (progress?.IsVisited == true)
+                    {
+                        <span class="badge bg-success">
+                            ✓ Изучено · @FormatTime(progress.TimeSpentSec)
+                        </span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-light text-dark">Не изучено</span>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public int TopicId { get; set; }
+
+    private List<Material>? materials;
+    private List<MaterialProgress>? progressList;
+
+    protected override async Task OnInitializedAsync()
+    {
+        materials = await Api.GetMaterialsAsync(TopicId);
+        progressList = await Api.GetAllProgressAsync();
+    }
+
+    private void OpenMaterial(int id) => Nav.NavigateTo($"/study/{id}");
+
+    private string FormatTime(int sec) => $"{sec / 60} мин";
+}
+```
+
+---
+
+### 5. Главный экран изучения (Study.razor) — самый важный
+
+```razor
+@page "/study/{Id:int}"
+@inject ApiService Api
+@implements IAsyncDisposable
+@using System.Threading
+
+<div class="study-layout">
+    <div class="study-header d-flex justify-content-between align-items-center mb-3">
+        <h3>@material?.Title</h3>
+        <div class="timer badge bg-primary fs-6">
+            Время: @FormatTime(timeSpent)
+        </div>
+    </div>
+
+    @if (material == null)
+    {
+        <p>Загрузка материала...</p>
+    }
+    else
+    {
+        <div class="material-content card p-4 shadow-sm">
+            @switch (material.Type.ToLower())
+            {
+                case "text":
+                case "html":
+                    <div>@((MarkupString)(material.Content ?? ""))</div>
+                    break;
+
+                case "pdf":
+                    <iframe src="@material.FileUrl" width="100%" height="750px" style="border:none;"></iframe>
+                    break;
+
+                case "video":
+                    <video src="@material.FileUrl" controls style="width:100%; max-height:700px;"></video>
+                    break;
+
+                default:
+                    <a href="@material.FileUrl" target="_blank" class="btn btn-outline-primary">
+                        Скачать файл (@material.Type)
+                    </a>
+                    break;
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public int Id { get; set; }
+
+    private Material? material;
+    private int timeSpent;
+    private PeriodicTimer? timer;
+    private CancellationTokenSource? cts;
+
+    protected override async Task OnInitializedAsync()
+    {
+        material = await Api.GetMaterialAsync(Id);
+
+        // Отмечаем, что материал открыт
+        await Api.UpdateProgressAsync(Id, 0);
+
+        // Запускаем таймер
+        cts = new CancellationTokenSource();
+        timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+
+        _ = RunTimerAsync(cts.Token);
+    }
+
+    private async Task RunTimerAsync(CancellationToken token)
+    {
+        try
+        {
+            while (await timer!.WaitForNextTickAsync(token))
+            {
+                timeSpent++;
+                await InvokeAsync(StateHasChanged);
+
+                // Каждые 30 секунд отправляем прогресс на сервер
+                if (timeSpent % 30 == 0)
+                {
+                    await Api.UpdateProgressAsync(Id, 30);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private string FormatTime(int sec) =>
+        $"{sec / 60:D2}:{sec % 60:D2}";
+
+    public async ValueTask DisposeAsync()
+    {
+        cts?.Cancel();
+        timer?.Dispose();
+        cts?.Dispose();
+
+        // При уходе со страницы отправляем оставшееся время
+        if (timeSpent > 0)
+        {
+            await Api.UpdateProgressAsync(Id, timeSpent % 30);
+        }
+    }
+}
+```
+
+---
+
+### 6. Нужные эндпоинты на бэкенде (C#)
+
+Добавь в `MaterialsController`:
+
+```csharp
+[HttpGet("{id}/progress")]
+public async Task<IActionResult> GetProgress(int id)
+{
+    var userId = int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    var progress = await _db.MaterialProgresses
+        .FirstOrDefaultAsync(p => p.UserId == userId && p.MaterialId == id);
+
+    if (progress == null)
+        return Ok(new { materialId = id, isVisited = false, timeSpentSec = 0 });
+
+    return Ok(new
+    {
+        materialId = progress.MaterialId,
+        isVisited = progress.IsVisited,
+        timeSpentSec = progress.TimeSpentSec,
+        lastOpenedAt = progress.LastOpenedAt
+    });
+}
+
+[HttpPost("{id}/progress")]
+public async Task<IActionResult> UpdateProgress(int id, [FromBody] ProgressDto dto)
+{
+    var userId = int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    var progress = await _db.MaterialProgresses
+        .FirstOrDefaultAsync(p => p.UserId == userId && p.MaterialId == id);
+
+    if (progress == null)
+    {
+        progress = new MaterialProgress
+        {
+            UserId = userId,
+            MaterialId = id,
+            IsVisited = true,
+            TimeSpentSec = dto.TimeSpentSec,
+            LastOpenedAt = DateTime.UtcNow
+        };
+        _db.MaterialProgresses.Add(progress);
+    }
+    else
+    {
+        progress.IsVisited = true;
+        progress.TimeSpentSec += dto.TimeSpentSec;
+        progress.LastOpenedAt = DateTime.UtcNow;
+    }
+
+    await _db.SaveChangesAsync();
+    return Ok();
+}
+
+[HttpGet("/api/progress")]
+public async Task<IActionResult> GetAllProgress()
+{
+    var userId = int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    var list = await _db.MaterialProgresses
+        .Where(p => p.UserId == userId)
+        .ToListAsync();
+    return Ok(list);
+}
+```
+
+И модель + DTO:
+
+```csharp
+public class MaterialProgress
+{
+    public int Id { get; set; }
+    public int UserId { get; set; }
+    public int MaterialId { get; set; }
+    public bool IsVisited { get; set; }
+    public int TimeSpentSec { get; set; }
+    public DateTime? LastOpenedAt { get; set; }
+}
+
+public class ProgressDto
+{
+    public int TimeSpentSec { get; set; }
+}
+```
+
+---
+
+### Что получилось лучше, чем в React-версии:
+
+- Таймер работает через `PeriodicTimer` (современный и чистый способ)
+- Прогресс сохраняется при уходе со страницы (`IAsyncDisposable`)
+- Каждые 30 секунд идёт автосохранение
+- Полностью типизировано
+- Красиво отображаются разные типы материалов (html, pdf, video)
+- Готово под Bootstrap 5
+
+---
+
+Хочешь, я сейчас дополнительно дам:
+
+1. Страницу общего прогресса (`Progress.razor`)
+2. Красивые стили (`study.css`)
+3. Или сразу версию с боковой навигацией по материалам темы?
+
+Скажи.
